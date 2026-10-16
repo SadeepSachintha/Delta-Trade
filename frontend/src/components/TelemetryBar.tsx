@@ -1,5 +1,5 @@
 import React from 'react';
-import { Activity, Zap, Server, Play, Pause, Settings } from 'lucide-react';
+import { Activity, Zap, Server, Play, Pause, Settings, Volume2, VolumeX } from 'lucide-react';
 
 interface TelemetryBarProps {
   telemetry: any;
@@ -8,6 +8,8 @@ interface TelemetryBarProps {
   onToggleAutoBot: () => void;
   onOpenConfig: () => void;
   isConnected: boolean;
+  isSoundEnabled?: boolean;
+  onToggleSound?: () => void;
 }
 
 export const TelemetryBar: React.FC<TelemetryBarProps> = ({
@@ -17,6 +19,8 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
   onToggleAutoBot,
   onOpenConfig,
   isConnected,
+  isSoundEnabled = false,
+  onToggleSound,
 }) => {
   const latencyUs = telemetry?.cycle_latency_us || 870;
   const latencyMs = (latencyUs / 1000).toFixed(2);
@@ -104,11 +108,26 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
           </div>
         </div>
 
+        {/* Kill Switch Halt Alert */}
+        {config?.kill_switch && (
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-rose-950/90 border border-rose-500 text-rose-200 font-mono text-xs font-bold shadow-lg shadow-rose-950/50 animate-pulse">
+            <span className="w-2 h-2 rounded-full bg-rose-500" />
+            <span>KILL SWITCH ENGAGED</span>
+          </div>
+        )}
+
         {/* Auto Bot Toggle */}
         <button
           onClick={onToggleAutoBot}
-          className={`btn-cyber ${isAutoEnabled ? 'btn-cyber-green' : 'border-slate-700 text-slate-400'}`}
-          title="Toggle Automated Execution Bot"
+          disabled={config?.kill_switch}
+          className={`btn-cyber ${
+            config?.kill_switch
+              ? 'border-rose-900 bg-rose-950/30 text-rose-500 cursor-not-allowed opacity-60'
+              : isAutoEnabled
+              ? 'btn-cyber-green'
+              : 'border-slate-700 text-slate-400'
+          }`}
+          title={config?.kill_switch ? "Trading halted by Risk Kill Switch" : "Toggle Automated Execution Bot"}
         >
           {isAutoEnabled ? (
             <>
@@ -123,6 +142,21 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
           )}
         </button>
 
+        {/* Audio Alerts Toggle */}
+        {onToggleSound && (
+          <button
+            onClick={onToggleSound}
+            className={`p-2 rounded-lg border transition-colors ${
+              isSoundEnabled
+                ? 'bg-cyan-950/80 border-cyan-500/50 text-cyan-400 hover:bg-cyan-900/80'
+                : 'bg-slate-900 hover:bg-slate-800 border-slate-800 hover:border-slate-700 text-slate-500 hover:text-slate-300'
+            }`}
+            title={isSoundEnabled ? 'Audio Chimes: Enabled (Click to mute)' : 'Audio Chimes: Muted (Click to enable)'}
+          >
+            {isSoundEnabled ? <Volume2 className="w-4 h-4" /> : <VolumeX className="w-4 h-4" />}
+          </button>
+        )}
+
         {/* Settings button */}
         <button
           onClick={onOpenConfig}
@@ -135,3 +169,4 @@ export const TelemetryBar: React.FC<TelemetryBarProps> = ({
     </header>
   );
 };
+

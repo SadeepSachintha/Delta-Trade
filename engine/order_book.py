@@ -224,12 +224,22 @@ class OrderBook:
             "timestamp_ns": self.last_update_time_ns
         }
 
-    def walk_book(self, side: str, order_size_usd: float) -> Tuple[float, float, float, bool]:
+    def walk_book(
+        self,
+        side: str,
+        amount: float,
+        is_quote_quantity: bool = True
+    ) -> Tuple[float, float, float, bool]:
         """
-        Simulates walking the order book for an order of size `order_size_usd`.
+        Simulates walking the order book depth for an execution order.
+        - side: "BUY" or "SELL"
+        - amount: If is_quote_quantity is True, amount specifies quote currency to spend/receive.
+                  If is_quote_quantity is False, amount specifies base units to buy/sell.
+        - is_quote_quantity: Distinguishes quote budget from base unit quantity.
+
         Returns:
           - vwap_price: Volume-Weighted Average Price executed
-          - filled_usd: Total USD filled (up to order_size_usd or total book depth)
+          - filled_quote: Total quote currency executed
           - slippage_bps: Slippage relative to best bid/ask in basis points
           - fully_filled: Boolean whether order was fully filled
         """
@@ -237,42 +247,57 @@ class OrderBook:
             self._rebuild_cache()
 
         if side.upper() == "BUY":
-            # Buying walks the ASKS (lowest to highest)
+            # Buying walks the ASKS (lowest ask first)
             levels = self._cached_asks
             if not levels:
                 return (0.0, 0.0, 0.0, False)
             best_price = levels[0][0]
         else:
-            # Selling walks the BIDS (highest to lowest)
+            # Selling walks the BIDS (highest bid first)
             levels = self._cached_bids
             if not levels:
                 return (0.0, 0.0, 0.0, False)
             best_price = levels[0][0]
 
-        remaining_usd = order_size_usd
+        remaining = amount
         total_qty_filled = 0.0
-        total_usd_filled = 0.0
+        total_quote_filled = 0.0
 
         for price, qty in levels:
-            level_usd = price * qty
-            if remaining_usd <= level_usd:
-                # Partial level fill completes order
-                needed_qty = remaining_usd / price
-                total_qty_filled += needed_qty
-                total_usd_filled += remaining_usd
-                remaining_usd = 0.0
-                break
+            if price <= 0:
+                continue
+
+            if is_quote_quantity:
+                # Target is quote currency amount
+                level_quote = price * qty
+                if remaining <= level_quote:
+                    needed_qty = remaining / price
+                    total_qty_filled += needed_qty
+                    total_quote_filled += remaining
+                    remaining = 0.0
+                    break
+                else:
+                    total_qty_filled += qty
+                    total_quote_filled += level_quote
+                    remaining -= level_quote
             else:
-                # Full level fill
-                total_qty_filled += qty
-                total_usd_filled += level_usd
-                remaining_usd -= level_usd
+                # Target is base currency units
+                if remaining <= qty:
+                    needed_qty = remaining
+                    total_qty_filled += needed_qty
+                    total_quote_filled += needed_qty * price
+                    remaining = 0.0
+                    break
+                else:
+                    total_qty_filled += qty
+                    total_quote_filled += qty * price
+                    remaining -= qty
 
         if total_qty_filled <= 0:
             return (best_price, 0.0, 0.0, False)
 
-        vwap_price = total_usd_filled / total_qty_filled
-        fully_filled = (remaining_usd <= 1e-4)
+        vwap_price = total_quote_filled / total_qty_filled
+        fully_filled = (remaining <= 1e-6)
 
         if side.upper() == "BUY":
             # For BUY, higher price is worse slippage
@@ -281,17 +306,26 @@ class OrderBook:
             # For SELL, lower price is worse slippage
             slippage_bps = ((best_price - vwap_price) / best_price) * 10000.0 if best_price > 0 else 0.0
 
-        return (vwap_price, total_usd_filled, max(0.0, slippage_bps), fully_filled)
+        return (vwap_price, total_quote_filled, max(0.0, slippage_bps), fully_filled)
 
-    def compute_slippage_curve(self, capital_tiers: List[float] = None) -> List[Dict]:
-        """Calculates VWAP and slippage for standard capital tiers ($1k, $5k, $10k, $50k, $100k)."""
+    def compute_slippage_curve(
+        self,
+        capital_tiers: List[float] = None,
+        quote_usd_rate: float = 1.0
+    ) -> List[Dict]:
+        """
+        Calculates VWAP and slippage for standard capital tiers ($1k, $5k, $10k, $25k, $50k, $100k).
+        Correctly converts USD capital tiers to native quote currency using quote_usd_rate.
+        """
         if capital_tiers is None:
             capital_tiers = [1000.0, 5000.0, 10000.0, 25000.0, 50000.0, 100000.0]
 
+        rate = max(1e-8, quote_usd_rate)
         results = []
         for cap in capital_tiers:
-            buy_vwap, buy_filled, buy_slip, buy_ok = self.walk_book("BUY", cap)
-            sell_vwap, sell_filled, sell_slip, sell_ok = self.walk_book("SELL", cap)
+            cap_quote = cap / rate
+            buy_vwap, buy_filled, buy_slip, buy_ok = self.walk_book("BUY", cap_quote, is_quote_quantity=True)
+            sell_vwap, sell_filled, sell_slip, sell_ok = self.walk_book("SELL", cap_quote, is_quote_quantity=True)
             results.append({
                 "capital_usd": cap,
                 "buy_vwap": buy_vwap,
@@ -302,3 +336,4 @@ class OrderBook:
                 "sell_fully_filled": sell_ok,
             })
         return results
+

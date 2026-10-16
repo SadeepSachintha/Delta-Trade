@@ -5,12 +5,15 @@ multi-leg order book fills, and automated algorithmic execution bots.
 """
 
 import asyncio
+import json
 import random
 import time
 import uuid
 from typing import Dict, List, Optional
+from pathlib import Path
 from .math_engine import ArbitrageRoute, ArbitrageLeg
 from .state_store import StateStore
+
 
 
 class ExecutionSimulator:
@@ -26,9 +29,32 @@ class ExecutionSimulator:
         self.auto_trade_capital_usd: float = 10000.0
         self.last_auto_trade_time: float = 0.0
         self.execution_cooldown_sec: float = 0.8
+        self._manual_kill_switch: bool = False
         
         # Seed initial realistic trades if database is empty
         self._seed_initial_history()
+
+    @property
+    def is_kill_switch_engaged(self) -> bool:
+        lock_file = Path(__file__).resolve().parent.parent / "management" / "kill_switch.lock"
+        return self._manual_kill_switch or lock_file.exists()
+
+    def set_kill_switch(self, engage: bool):
+        self._manual_kill_switch = engage
+        lock_file = Path(__file__).resolve().parent.parent / "management" / "kill_switch.lock"
+        if engage:
+            lock_file.parent.mkdir(parents=True, exist_ok=True)
+            lock_file.write_text(json.dumps({
+                "engaged_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "reason": "Emergency halt triggered by risk administrator"
+            }))
+        else:
+            if lock_file.exists():
+                try:
+                    lock_file.unlink()
+                except Exception:
+                    pass
+
 
     def _seed_initial_history(self):
         existing = self.state_store.get_recent_executions(limit=5)
@@ -103,11 +129,15 @@ class ExecutionSimulator:
         """
         Simulates atomic multi-leg execution against current live book depth.
         Accounts for:
+          - Emergency risk kill switch check
           - Simulated queuing latency
           - Adverse selection probability (liquidity taken by competing HFTs)
           - VWAP slippage on each leg
           - Exchange taker fees
         """
+        if self.is_kill_switch_engaged:
+            raise ValueError("EMERGENCY_KILL_SWITCH_ACTIVE: Execution halted by risk manager.")
+
         exec_id = f"EXE-{uuid.uuid4().hex[:8].upper()}"
         latency_jitter = self.simulated_latency_ms + (random.random() - 0.5) * 4.0
 
@@ -170,8 +200,8 @@ class ExecutionSimulator:
         return exec_record
 
     def evaluate_auto_arbitrage(self, routes: List[ArbitrageRoute]) -> Optional[Dict]:
-        """Auto-execution evaluation: executes top route if auto_bot_enabled and thresholds met."""
-        if not self.auto_bot_enabled:
+        """Auto-execution evaluation: executes top route if auto_bot_enabled, kill switch is off, and thresholds met."""
+        if not self.auto_bot_enabled or self.is_kill_switch_engaged:
             return None
 
         now = time.time()
@@ -181,7 +211,10 @@ class ExecutionSimulator:
         for route in routes:
             if route.net_spread_bps >= self.auto_min_spread_bps and route.expected_profit_usd >= 4.0:
                 self.last_auto_trade_time = now
-                return self.execute_route(route, self.auto_trade_capital_usd)
+                try:
+                    return self.execute_route(route, self.auto_trade_capital_usd)
+                except ValueError:
+                    return None
 
         return None
 
@@ -195,6 +228,8 @@ class ExecutionSimulator:
             self.auto_min_spread_bps = float(cfg["auto_min_spread_bps"])
         if "auto_trade_capital_usd" in cfg:
             self.auto_trade_capital_usd = float(cfg["auto_trade_capital_usd"])
+        if "kill_switch" in cfg:
+            self.set_kill_switch(bool(cfg["kill_switch"]))
 
     def get_config(self) -> Dict:
         return {
@@ -203,5 +238,7 @@ class ExecutionSimulator:
             "auto_bot_enabled": self.auto_bot_enabled,
             "auto_min_spread_bps": self.auto_min_spread_bps,
             "auto_trade_capital_usd": self.auto_trade_capital_usd,
-            "execution_cooldown_sec": self.execution_cooldown_sec
+            "execution_cooldown_sec": self.execution_cooldown_sec,
+            "kill_switch": self.is_kill_switch_engaged
         }
+

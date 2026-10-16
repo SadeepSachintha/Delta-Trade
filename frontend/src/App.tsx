@@ -6,6 +6,7 @@ import { Level2OrderBook } from './components/Level2OrderBook';
 import { MatrixHeatmap } from './components/MatrixHeatmap';
 import { ExecutionLog } from './components/ExecutionLog';
 import { ConfigModal } from './components/ConfigModal';
+import { soundSynth } from './utils/sound';
 
 export const App: React.FC = () => {
   const [telemetry, setTelemetry] = useState<any>({
@@ -28,15 +29,44 @@ export const App: React.FC = () => {
     auto_bot_enabled: false,
     auto_min_spread_bps: 6.0,
     auto_trade_capital_usd: 10000.0,
+    kill_switch: false,
   });
 
+  const [marketSpreads, setMarketSpreads] = useState<Record<string, any>>({});
+  const [liveL2Book, setLiveL2Book] = useState<any>(null);
   const [selectedSymbol, setSelectedSymbol] = useState<string>('BTCUSDT');
   const [selectedExchange, setSelectedExchange] = useState<string>('Binance');
   const [isConfigOpen, setIsConfigOpen] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
+  const [isSoundEnabled, setIsSoundEnabled] = useState<boolean>(false);
+
+  const handleToggleSound = () => {
+    const nextState = soundSynth.toggle();
+    setIsSoundEnabled(nextState);
+  };
 
   const wsRef = useRef<WebSocket | null>(null);
+  const selectedExchangeRef = useRef(selectedExchange);
+  const selectedSymbolRef = useRef(selectedSymbol);
+
+  useEffect(() => {
+    selectedExchangeRef.current = selectedExchange;
+    selectedSymbolRef.current = selectedSymbol;
+  }, [selectedExchange, selectedSymbol]);
+
+  // Subscribe to active orderbook depth on symbol or venue change
+  useEffect(() => {
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(
+        JSON.stringify({
+          action: 'SUBSCRIBE_BOOK',
+          exchange: selectedExchange,
+          symbol: selectedSymbol,
+        })
+      );
+    }
+  }, [selectedExchange, selectedSymbol, isConnected]);
 
   // WebSocket Connection & Real-Time Ingress
   useEffect(() => {
@@ -52,6 +82,14 @@ export const App: React.FC = () => {
 
       ws.onopen = () => {
         setIsConnected(true);
+        // Initial subscription using current refs
+        ws.send(
+          JSON.stringify({
+            action: 'SUBSCRIBE_BOOK',
+            exchange: selectedExchangeRef.current,
+            symbol: selectedSymbolRef.current,
+          })
+        );
       };
 
       ws.onmessage = (event) => {
@@ -63,23 +101,33 @@ export const App: React.FC = () => {
             if (data.stats) setStats(data.stats);
             if (data.history) setExecutions(data.history);
             if (data.config) setConfig(data.config);
+            if (data.market_spreads) setMarketSpreads(data.market_spreads);
           } else if (data.type === 'MICRO_BATCH') {
             if (data.telemetry) setTelemetry(data.telemetry);
             if (data.opportunities) setOpportunities(data.opportunities);
+            if (data.market_spreads) setMarketSpreads(data.market_spreads);
+          } else if (data.type === 'L2_UPDATE') {
+            setLiveL2Book(data);
           } else if (data.type === 'MATRIX') {
             setMatrix(data.matrix);
           } else if (data.type === 'EXECUTION') {
             if (data.trade) {
               setExecutions((prev) => [data.trade, ...prev.slice(0, 49)]);
+              if (data.trade.fill_status === 'FILLED') {
+                soundSynth.playFillSuccess();
+              }
             }
             if (data.stats) setStats(data.stats);
           } else if (data.type === 'CONFIG_UPDATE') {
             if (data.config) setConfig(data.config);
           }
-        } catch (err) {
+        } catch {
           // Ignore parse errors
         }
       };
+
+
+
 
       ws.onclose = () => {
         setIsConnected(false);
@@ -142,6 +190,9 @@ export const App: React.FC = () => {
         const data = await res.json();
         if (data.trade) {
           setExecutions((prev) => [data.trade, ...prev.slice(0, 49)]);
+          if (data.trade.fill_status === 'FILLED') {
+            soundSynth.playFillSuccess();
+          }
           if (data.stats) setStats(data.stats);
         }
       }
@@ -195,6 +246,8 @@ export const App: React.FC = () => {
         onToggleAutoBot={handleToggleAutoBot}
         onOpenConfig={() => setIsConfigOpen(true)}
         isConnected={isConnected}
+        isSoundEnabled={isSoundEnabled}
+        onToggleSound={handleToggleSound}
       />
 
       {/* Main Grid: Upper Tier */}
@@ -214,8 +267,10 @@ export const App: React.FC = () => {
             selectedSymbol={selectedSymbol}
             onSelectSymbol={setSelectedSymbol}
             recentTrades={executions}
+            liveSpreadData={marketSpreads[selectedSymbol]}
           />
         </div>
+
       </div>
 
       {/* Main Grid: Lower Tier */}
@@ -226,7 +281,9 @@ export const App: React.FC = () => {
             symbol={selectedSymbol}
             selectedExchange={selectedExchange}
             onSelectExchange={setSelectedExchange}
+            liveL2Data={liveL2Book}
           />
+
         </div>
 
         {/* Currency Adjacency Matrix & Negative Cycle Heatmap */}

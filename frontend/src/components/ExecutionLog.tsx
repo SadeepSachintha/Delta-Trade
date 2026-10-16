@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { History, CheckCircle2, AlertCircle, ChevronDown, ChevronRight } from 'lucide-react';
+import { History, CheckCircle2, AlertCircle, ChevronDown, ChevronRight, Download } from 'lucide-react';
 
 interface ExecutionLeg {
   step: number;
@@ -43,6 +43,66 @@ export const ExecutionLog: React.FC<ExecutionLogProps> = ({ executions, stats })
     setExpandedId(expandedId === id ? null : id);
   };
 
+  const exportCSV = () => {
+    if (!executions || executions.length === 0) return;
+    const headers = [
+      'Exec ID',
+      'Route ID',
+      'Type',
+      'Path',
+      'Venues',
+      'Capital USD',
+      'Gross PnL USD',
+      'Fee Drag USD',
+      'Slippage Drag USD',
+      'Net PnL USD',
+      'ROI bps',
+      'Latency ms',
+      'Status',
+      'Created At'
+    ];
+    const rows = executions.map((t) => [
+      `"${t.id}"`,
+      `"${t.route_id || ''}"`,
+      `"${t.route_type || ''}"`,
+      `"${(t.path || []).join(' -> ')}"`,
+      `"${(t.venues || []).join(', ')}"`,
+      t.capital_usd ?? 0,
+      t.gross_pnl_usd ?? 0,
+      t.fee_drag_usd ?? 0,
+      t.slippage_drag_usd ?? 0,
+      t.net_pnl_usd ?? 0,
+      t.roi_bps ?? 0,
+      t.execution_latency_ms ?? 0,
+      `"${t.fill_status || ''}"`,
+      `"${t.created_at || new Date().toISOString()}"`
+    ]);
+
+    const csvContent = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `delta_trade_executions_${Date.now()}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const exportJSON = () => {
+    if (!executions || executions.length === 0) return;
+    const blob = new Blob([JSON.stringify(executions, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.setAttribute('download', `delta_trade_executions_${Date.now()}.json`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <div className="glass-panel p-4 flex flex-col h-full">
       {/* Header */}
@@ -54,8 +114,30 @@ export const ExecutionLog: React.FC<ExecutionLogProps> = ({ executions, stats })
           </h2>
         </div>
 
-        {/* Quick Stats Pills */}
-        <div className="flex items-center gap-2 font-mono text-[11px]">
+        {/* Action Controls & Quick Stats Pills */}
+        <div className="flex items-center gap-2 font-mono text-[11px] flex-wrap">
+          {/* Export Buttons */}
+          <div className="flex items-center gap-1.5 mr-1">
+            <button
+              onClick={exportCSV}
+              disabled={executions.length === 0}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-800 text-[10px] text-slate-300 font-mono transition-colors"
+              title="Export trade history as CSV"
+            >
+              <Download className="w-2.5 h-2.5 text-cyan-400" />
+              <span>CSV</span>
+            </button>
+            <button
+              onClick={exportJSON}
+              disabled={executions.length === 0}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-900 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed border border-slate-800 text-[10px] text-slate-300 font-mono transition-colors"
+              title="Export trade history as JSON"
+            >
+              <Download className="w-2.5 h-2.5 text-emerald-400" />
+              <span>JSON</span>
+            </button>
+          </div>
+
           <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-slate-400">
             Trades: <strong className="text-slate-200">{stats?.total_trades || 0}</strong>
           </span>

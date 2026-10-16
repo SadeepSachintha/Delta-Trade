@@ -29,6 +29,27 @@ class MarketFeedManager:
         "DOGEUSDT": 0.1420,
     }
 
+    # Institutional precision and tick specifications per instrument
+    SYMBOL_SPECS = {
+        "BTCUSDT": {"price_dec": 2, "qty_dec": 4},
+        "ETHUSDT": {"price_dec": 2, "qty_dec": 4},
+        "SOLUSDT": {"price_dec": 2, "qty_dec": 3},
+        "BNBUSDT": {"price_dec": 2, "qty_dec": 3},
+        "XRPUSDT": {"price_dec": 4, "qty_dec": 1},
+        "DOGEUSDT":{"price_dec": 5, "qty_dec": 0},
+        "ETHBTC":  {"price_dec": 6, "qty_dec": 4},
+        "SOLBTC":  {"price_dec": 7, "qty_dec": 3},
+        "BNBBTC":  {"price_dec": 6, "qty_dec": 3},
+    }
+
+    def round_price(self, sym: str, price: float) -> float:
+        dec = self.SYMBOL_SPECS.get(sym, {}).get("price_dec", 4 if price < 10 else 2)
+        return round(price, dec)
+
+    def round_qty(self, sym: str, qty: float) -> float:
+        dec = self.SYMBOL_SPECS.get(sym, {}).get("qty_dec", 4)
+        return round(qty, dec)
+
     def __init__(self):
         # order_books[(exchange, symbol)] = OrderBook
         self.order_books: Dict[tuple, OrderBook] = {}
@@ -75,18 +96,19 @@ class MarketFeedManager:
         """Synchronizes other venue books to live market price with realistic 1-5 bps basis."""
         venue_skew = (hash(f"{ex}_{sym}") % 5 - 2) * 0.0001
         p_center = center_p * (1.0 + venue_skew)
-        half_spread = max(0.0001, p_center * 0.00025)
+        half_spread = max(1e-7, p_center * 0.00025)
         bids = []
         asks = []
         for i in range(20):
-            p_bid = round(p_center - half_spread - (i * p_center * 0.00012), 4 if p_center < 10 else 2)
-            p_ask = round(p_center + half_spread + (i * p_center * 0.00012), 4 if p_center < 10 else 2)
-            lot = (12000.0 / p_center) * (0.8 + 0.4 * random.random()) * (1.0 + i * 0.3)
-            bids.append([p_bid, round(lot, 4)])
-            asks.append([p_ask, round(lot, 4)])
+            p_bid = self.round_price(sym, p_center - half_spread - (i * p_center * 0.00012))
+            p_ask = self.round_price(sym, p_center + half_spread + (i * p_center * 0.00012))
+            lot = (12000.0 / max(1e-6, p_center)) * (0.8 + 0.4 * random.random()) * (1.0 + i * 0.3)
+            bids.append([p_bid, self.round_qty(sym, lot)])
+            asks.append([p_ask, self.round_qty(sym, lot)])
         book = self.order_books.get((ex, sym))
         if book:
             book.apply_snapshot(bids, asks, update_id=book.last_update_id + 1)
+
 
     def _on_snapshot(self, exchange: str, symbol: str, bids: List, asks: List, update_id: int):
         key = (exchange, symbol)
@@ -180,15 +202,16 @@ class MarketFeedManager:
                         new_bids = []
                         new_asks = []
                         for i in range(5):
-                            p_bid = round(new_mid - (spread / 2.0) - (i * new_mid * 0.00012), 4 if new_mid < 10 else 2)
-                            p_ask = round(new_mid + (spread / 2.0) + (i * new_mid * 0.00012), 4 if new_mid < 10 else 2)
+                            p_bid = self.round_price(sym, new_mid - (spread / 2.0) - (i * new_mid * 0.00012))
+                            p_ask = self.round_price(sym, new_mid + (spread / 2.0) + (i * new_mid * 0.00012))
                             
-                            lot = (10000.0 / new_mid) * (0.7 + 0.6 * random.random())
-                            new_bids.append([p_bid, round(lot, 4)])
-                            new_asks.append([p_ask, round(lot, 4)])
+                            lot = (10000.0 / max(1e-6, new_mid)) * (0.7 + 0.6 * random.random())
+                            new_bids.append([p_bid, self.round_qty(sym, lot)])
+                            new_asks.append([p_ask, self.round_qty(sym, lot)])
 
                         book.apply_delta(new_bids, new_asks, book.last_update_id + 1)
                         self.ticks_processed += 1
+
 
                 # Sub-50ms micro-batch sleep (approx 30-50 ticks per batch, 500-1000 ticks/sec)
                 await asyncio.sleep(0.04)

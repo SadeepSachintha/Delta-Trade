@@ -203,12 +203,10 @@ class ArbitrageMathEngine:
         if not edges:
             return []
 
-        # Standard anchor: start from USDT (index 0)
-        source = 0
-        dist = [float('inf')] * n
+        # Universal super-source anchor: initialize all distances to 0.0 to detect cycles anywhere in graph
+        dist = [0.0] * n
         parent = [-1] * n
         edge_used = [None] * n
-        dist[source] = 0.0
 
         # Relax edges (n - 1) times
         for _ in range(n - 1):
@@ -222,50 +220,72 @@ class ArbitrageMathEngine:
             if not relaxed:
                 break
 
-        # Check for negative cycle on the n-th pass
-        neg_cycle_node = -1
+        # Check for negative cycle candidates on the n-th pass
+        neg_cycle_nodes = []
         for u, v, w, info in edges:
             if dist[u] + w < dist[v] - 1e-7:
                 parent[v] = u
                 edge_used[v] = info
-                neg_cycle_node = v
-                break
+                neg_cycle_nodes.append(v)
 
-        if neg_cycle_node != -1:
+        seen_cycles = set()
+        for node in neg_cycle_nodes:
             # Trace cycle back to recover vertices
-            visited = {}
-            curr = neg_cycle_node
+            curr = node
             for _ in range(n):
                 curr = parent[curr]
 
             cycle = []
             cycle_start = curr
             curr = cycle_start
-            while True:
+            for _ in range(n + 1):
                 cycle.append(curr)
                 curr = parent[curr]
                 if curr == cycle_start and len(cycle) > 1:
                     cycle.append(cycle_start)
                     break
-                if len(cycle) > n + 1:
-                    break
 
             cycle.reverse()
             if len(cycle) >= 3 and cycle[0] == cycle[-1]:
-                # Valid cycle found! Evaluate depth walking and VWAP slippage
-                path_names = [self.CURRENCIES[idx] for idx in cycle]
-                route = self._evaluate_triangular_depth(path_names, test_capital, t_start)
-                if route and route.net_spread_bps > 0:
-                    routes.append(route)
+                raw_path = [self.CURRENCIES[idx] for idx in cycle]
+                # Rotate cycle so USDT is first if it is present
+                if "USDT" in raw_path[:-1]:
+                    u_idx = raw_path[:-1].index("USDT")
+                    path_names = raw_path[u_idx:-1] + raw_path[:u_idx] + ["USDT"]
+                else:
+                    path_names = raw_path
+
+                path_key = "->".join(path_names)
+                if path_key not in seen_cycles:
+                    seen_cycles.add(path_key)
+                    route = self._evaluate_triangular_depth(path_names, test_capital, t_start)
+                    if route and route.net_spread_bps > 0:
+                        routes.append(route)
 
         return routes
+
+    def get_usd_value(self, currency: str, amount: float) -> float:
+        """Converts an amount of any currency into USD using live order books or baseline reference."""
+        if currency == "USDT" or amount <= 0:
+            return amount
+        pair = f"{currency}USDT"
+        for ex in self.feed_manager.EXCHANGES:
+            book = self.feed_manager.get_order_book(ex, pair)
+            if book and book.mid_price and book.mid_price > 0:
+                return amount * book.mid_price
+        base_p = self.feed_manager.BASE_PRICES.get(pair, 1.0)
+        return amount * base_p
 
     def _evaluate_triangular_depth(self, path: List[str], initial_capital: float, t_start: int) -> Optional[ArbitrageRoute]:
         """
         Walks actual reconstructed L2 order books for all legs of a triangular cycle,
         calculating VWAP, slippage drag, maker/taker fee drag, and net PnL.
         """
-        curr_capital = initial_capital
+        # Convert initial USD capital to starting currency
+        start_curr = path[0]
+        start_unit_usd = self.get_usd_value(start_curr, 1.0)
+        curr_capital = initial_capital if start_curr == "USDT" else (initial_capital / max(1e-8, start_unit_usd))
+
         legs: List[ArbitrageLeg] = []
         total_fee_drag = 0.0
         total_slip_drag = 0.0
@@ -286,9 +306,10 @@ class ArbitrageMathEngine:
             fee_rate = FEE_TIERS.get(venue, 0.001)
 
             # Order book depth walk for exact fill
-            # Estimate USD order size
-            approx_usd_size = curr_capital if u == "USDT" else (curr_capital * (book.mid_price or 1.0))
-            vwap, filled_usd, slippage_bps, is_filled = book.walk_book(action, approx_usd_size)
+            # If action == "BUY", u is quote currency (spending u to buy v) -> is_quote_quantity = True
+            # If action == "SELL", u is base currency (selling u for v) -> is_quote_quantity = False
+            is_quote_qty = (action == "BUY")
+            vwap, _, slippage_bps, is_filled = book.walk_book(action, curr_capital, is_quote_quantity=is_quote_qty)
             
             if not is_filled or vwap <= 0:
                 vwap = book.best_ask[0] if action == "BUY" else book.best_bid[0]
@@ -296,16 +317,16 @@ class ArbitrageMathEngine:
 
             # Calculate actual leg execution
             if action == "BUY":
-                # Buy base currency with quote
+                # Buy base currency (v) with quote currency (u)
                 units_bought = (curr_capital / vwap) * (1.0 - fee_rate)
-                fee_usd = curr_capital * fee_rate
-                slip_usd = curr_capital * (slippage_bps / 10000.0)
+                fee_usd = self.get_usd_value(u, curr_capital * fee_rate)
+                slip_usd = self.get_usd_value(u, curr_capital * (slippage_bps / 10000.0))
                 next_capital = units_bought
             else:
-                # Sell base currency for quote
+                # Sell base currency (u) for quote currency (v)
                 proceeds = (curr_capital * vwap) * (1.0 - fee_rate)
-                fee_usd = (curr_capital * vwap) * fee_rate
-                slip_usd = (curr_capital * vwap) * (slippage_bps / 10000.0)
+                fee_usd = self.get_usd_value(v, (curr_capital * vwap) * fee_rate)
+                slip_usd = self.get_usd_value(v, (curr_capital * vwap) * (slippage_bps / 10000.0))
                 next_capital = proceeds
 
             total_fee_drag += fee_usd
@@ -327,8 +348,8 @@ class ArbitrageMathEngine:
             ))
             curr_capital = next_capital
 
-        final_capital = curr_capital
-        expected_profit_usd = final_capital - initial_capital
+        final_capital_usd = self.get_usd_value(path[-1], curr_capital)
+        expected_profit_usd = final_capital_usd - initial_capital
         net_spread_bps = (expected_profit_usd / initial_capital) * 10000.0
         gross_spread_bps = net_spread_bps + ((total_fee_drag + total_slip_drag) / initial_capital) * 10000.0
 
@@ -366,8 +387,22 @@ class ArbitrageMathEngine:
         spatial_routes: List[ArbitrageRoute] = []
         t_start = time.perf_counter_ns()
 
-        for sym in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"]:
-            # Compare every venue pair (ex_buy, ex_sell)
+        pairs_to_scan = [
+            ("BTCUSDT", "BTC", "USDT"),
+            ("ETHUSDT", "ETH", "USDT"),
+            ("SOLUSDT", "SOL", "USDT"),
+            ("BNBUSDT", "BNB", "USDT"),
+            ("XRPUSDT", "XRP", "USDT"),
+            ("DOGEUSDT", "DOGE", "USDT"),
+            ("ETHBTC", "ETH", "BTC"),
+            ("SOLBTC", "SOL", "BTC"),
+            ("BNBBTC", "BNB", "BTC")
+        ]
+
+        for sym, base_curr, quote_curr in pairs_to_scan:
+            quote_usd = self.get_usd_value(quote_curr, 1.0)
+            quote_capital = test_capital / max(1e-8, quote_usd)
+
             for ex_buy in self.feed_manager.EXCHANGES:
                 book_buy = self.feed_manager.get_order_book(ex_buy, sym)
                 if not book_buy or not book_buy.best_ask:
@@ -384,18 +419,20 @@ class ArbitrageMathEngine:
 
                     # Check basic spread
                     if bid_p > ask_p:
-                        # Depth walk on both sides for test capital
-                        buy_vwap, _, buy_slip, buy_ok = book_buy.walk_book("BUY", test_capital)
-                        sell_vwap, _, sell_slip, sell_ok = book_sell.walk_book("SELL", test_capital)
-                        
+                        # Depth walk on Buy venue for quote currency budget
+                        buy_vwap, _, buy_slip, buy_ok = book_buy.walk_book("BUY", quote_capital, is_quote_quantity=True)
                         fee_buy = FEE_TIERS.get(ex_buy, 0.001)
                         fee_sell = FEE_TIERS.get(ex_sell, 0.001)
 
-                        qty_bought = (test_capital / buy_vwap) * (1.0 - fee_buy)
-                        gross_proceeds = qty_bought * sell_vwap
-                        net_proceeds = gross_proceeds * (1.0 - fee_sell) - TRANSFER_GAS_USD
+                        qty_bought = (quote_capital / buy_vwap) * (1.0 - fee_buy)
+                        # Depth walk on Sell venue for exact base quantity acquired
+                        sell_vwap, _, sell_slip, sell_ok = book_sell.walk_book("SELL", qty_bought, is_quote_quantity=False)
                         
-                        profit_usd = net_proceeds - test_capital
+                        gross_proceeds_quote = qty_bought * sell_vwap
+                        net_proceeds_quote = gross_proceeds_quote * (1.0 - fee_sell)
+                        net_proceeds_usd = (net_proceeds_quote * quote_usd) - TRANSFER_GAS_USD
+                        
+                        profit_usd = net_proceeds_usd - test_capital
                         net_spread_bps = (profit_usd / test_capital) * 10000.0
 
                         if net_spread_bps > 1.0: # At least 1.0 bps net profit after all fees & slippage
@@ -406,38 +443,38 @@ class ArbitrageMathEngine:
                             
                             leg1 = ArbitrageLeg(
                                 step=1,
-                                from_currency="USDT",
-                                to_currency=sym.replace("USDT", ""),
+                                from_currency=quote_curr,
+                                to_currency=base_curr,
                                 exchange=ex_buy,
                                 action="BUY",
                                 symbol=sym,
                                 rate=1.0 / buy_vwap,
-                                vwap=round(buy_vwap, 2),
+                                vwap=round(buy_vwap, 6 if buy_vwap < 10 else 2),
                                 fee_rate=fee_buy,
                                 slippage_bps=round(buy_slip, 2),
-                                input_amount=test_capital,
+                                input_amount=round(quote_capital, 4),
                                 output_amount=round(qty_bought, 4)
                             )
                             
                             leg2 = ArbitrageLeg(
                                 step=2,
-                                from_currency=sym.replace("USDT", ""),
-                                to_currency="USDT",
+                                from_currency=base_curr,
+                                to_currency=quote_curr,
                                 exchange=ex_sell,
                                 action="SELL",
                                 symbol=sym,
                                 rate=sell_vwap,
-                                vwap=round(sell_vwap, 2),
+                                vwap=round(sell_vwap, 6 if sell_vwap < 10 else 2),
                                 fee_rate=fee_sell,
                                 slippage_bps=round(sell_slip, 2),
                                 input_amount=round(qty_bought, 4),
-                                output_amount=round(net_proceeds, 2)
+                                output_amount=round(net_proceeds_quote, 4)
                             )
 
                             spatial_routes.append(ArbitrageRoute(
                                 route_id=route_id,
                                 route_type="SPATIAL",
-                                path=["USDT", sym.replace("USDT", ""), "USDT"],
+                                path=[quote_curr, base_curr, quote_curr],
                                 exchanges=[ex_buy, ex_sell],
                                 gross_spread_bps=round(gross_spread_bps, 2),
                                 net_spread_bps=round(net_spread_bps, 2),
@@ -451,3 +488,4 @@ class ArbitrageMathEngine:
                             ))
 
         return spatial_routes
+

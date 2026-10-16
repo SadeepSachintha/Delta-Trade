@@ -2,20 +2,32 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createChart, type IChartApi, type ISeriesApi, AreaSeries, ColorType, LineStyle } from 'lightweight-charts';
 import { BarChart2 } from 'lucide-react';
 
+interface LiveSpreadInfo {
+  spread_bps: number;
+  mid_price: number;
+  imbalance?: number;
+  best_bid?: number;
+  best_ask?: number;
+}
+
 interface SpreadChartProps {
   selectedSymbol: string;
   onSelectSymbol: (symbol: string) => void;
   recentTrades?: any[];
+  liveSpreadData?: LiveSpreadInfo;
 }
 
 export const SpreadChart: React.FC<SpreadChartProps> = ({
   selectedSymbol,
   onSelectSymbol,
+  liveSpreadData,
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<'Area'> | null>(null);
-  const [currentSpreadBps, setCurrentSpreadBps] = useState<number>(8.4);
+  const lastTimeRef = useRef<number>(0);
+  const initialSpreadRef = useRef<number>(liveSpreadData?.spread_bps || 7.5);
+  const [currentSpreadBps, setCurrentSpreadBps] = useState<number>(liveSpreadData?.spread_bps || 8.4);
 
   const symbols = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ETHBTC', 'SOLBTC', 'BNBUSDT'];
 
@@ -62,40 +74,29 @@ export const SpreadChart: React.FC<SpreadChartProps> = ({
       },
     });
 
-    // Seed historical spread data points
+    // Seed historical spread baseline points
     const nowSec = Math.floor(Date.now() / 1000);
     const initialData = [];
-    let baseVal = 7.5;
-    for (let i = 60; i >= 0; i--) {
-      baseVal += (Math.random() - 0.48) * 0.8;
-      baseVal = Math.max(1.2, Math.min(28.0, baseVal));
+    const baseVal = initialSpreadRef.current;
+    for (let i = 40; i >= 1; i--) {
+      const historicalTime = nowSec - i;
       initialData.push({
-        time: (nowSec - i * 2) as any,
+        time: historicalTime as any,
         value: Number(baseVal.toFixed(2)),
       });
     }
+
+    initialData.push({
+      time: nowSec as any,
+      value: Number(baseVal.toFixed(2)),
+    });
+    lastTimeRef.current = nowSec;
 
     areaSeries.setData(initialData);
     chart.timeScale().fitContent();
 
     chartRef.current = chart;
     seriesRef.current = areaSeries;
-
-    // Real-time tick generator for spread basis
-    const interval = setInterval(() => {
-      const curTime = Math.floor(Date.now() / 1000);
-      const delta = (Math.random() - 0.49) * 0.9;
-      setCurrentSpreadBps((prev) => {
-        const nextVal = Math.max(1.5, Math.min(32.0, Number((prev + delta).toFixed(2))));
-        if (seriesRef.current) {
-          seriesRef.current.update({
-            time: curTime as any,
-            value: nextVal,
-          });
-        }
-        return nextVal;
-      });
-    }, 1000);
 
     // Resize observer for responsive layout
     const resizeObserver = new ResizeObserver((entries) => {
@@ -113,11 +114,34 @@ export const SpreadChart: React.FC<SpreadChartProps> = ({
     resizeObserver.observe(chartContainerRef.current);
 
     return () => {
-      clearInterval(interval);
       resizeObserver.disconnect();
       chart.remove();
+      chartRef.current = null;
+      seriesRef.current = null;
     };
   }, [selectedSymbol]);
+
+  // Handle incoming live spread updates from WebSocket
+  useEffect(() => {
+    if (!seriesRef.current || !liveSpreadData) return;
+    const nowSec = Math.floor(Date.now() / 1000);
+
+    // Monotonic time check required by TradingView Lightweight Charts
+    if (nowSec <= lastTimeRef.current) return;
+    lastTimeRef.current = nowSec;
+
+    const liveVal = Number(liveSpreadData.spread_bps.toFixed(2));
+    setCurrentSpreadBps(liveVal);
+    try {
+      seriesRef.current.update({
+        time: nowSec as any,
+        value: liveVal,
+      });
+    } catch {
+      // Ignore timestamp overlap gracefully
+    }
+  }, [liveSpreadData]);
+
 
   return (
     <div className="glass-panel p-4 flex flex-col h-full min-h-[320px]">

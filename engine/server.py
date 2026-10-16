@@ -38,13 +38,19 @@ simulator = ExecutionSimulator(state_store, feed_manager)
 class ConnectionManager:
     def __init__(self):
         self.active_connections: Set[WebSocket] = set()
+        self.subscriptions: Dict[WebSocket, Tuple[str, str]] = {}
 
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.add(websocket)
+        self.subscriptions[websocket] = ("Binance", "BTCUSDT")
 
     def disconnect(self, websocket: WebSocket):
         self.active_connections.discard(websocket)
+        self.subscriptions.pop(websocket, None)
+
+    def subscribe(self, websocket: WebSocket, exchange: str, symbol: str):
+        self.subscriptions[websocket] = (exchange, symbol)
 
     async def broadcast(self, message: Dict):
         if not self.active_connections:
@@ -58,6 +64,7 @@ class ConnectionManager:
                 dead_sockets.add(connection)
         for dead in dead_sockets:
             self.active_connections.discard(dead)
+            self.subscriptions.pop(dead, None)
 
 ws_manager = ConnectionManager()
 
@@ -138,6 +145,19 @@ async def run_hft_engine_loop():
                     ]
                 })
 
+            # Compute real-time top-of-book spreads across key pairs
+            market_spreads = {}
+            for s in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ETHBTC", "SOLBTC", "BNBUSDT"]:
+                bk = feed_manager.get_order_book("Binance", s)
+                if bk and bk.best_bid and bk.best_ask:
+                    market_spreads[s] = {
+                        "spread_bps": round(bk.spread_bps, 2),
+                        "mid_price": round(bk.mid_price, 6 if (bk.mid_price or 0) < 10 else 2),
+                        "imbalance": round(bk.order_book_imbalance, 4),
+                        "best_bid": bk.best_bid[0],
+                        "best_ask": bk.best_ask[0]
+                    }
+
             # Broadcast opportunities and engine telemetry every ~100ms
             feed_telemetry = feed_manager.get_telemetry()
             await ws_manager.broadcast({
@@ -148,8 +168,41 @@ async def run_hft_engine_loop():
                     "total_ticks": feed_telemetry["ticks_processed"],
                     "connections": len(ws_manager.active_connections)
                 },
-                "opportunities": serialized_routes
+                "opportunities": serialized_routes,
+                "market_spreads": market_spreads
             })
+
+            # Every 2nd loop (~200ms), stream L2 depth directly to subscribed clients
+            if loop_count % 2 == 0 and ws_manager.active_connections:
+                sub_cache = {}
+                for ws, (ex, sym) in list(ws_manager.subscriptions.items()):
+                    if ws not in ws_manager.active_connections:
+                        continue
+                    if (ex, sym) not in sub_cache:
+                        book = feed_manager.get_order_book(ex, sym)
+                        if book:
+                            quote_curr = "USDT"
+                            for q in ["USDT", "BTC", "ETH"]:
+                                if sym.endswith(q):
+                                    quote_curr = q
+                                    break
+                            rate = math_engine.get_usd_value(quote_curr, 1.0)
+                            sub_cache[(ex, sym)] = {
+                                "type": "L2_UPDATE",
+                                "exchange": ex,
+                                "symbol": sym,
+                                "depth": book.get_depth(levels=20),
+                                "slippage_curve": book.compute_slippage_curve(quote_usd_rate=rate)
+                            }
+                        else:
+                            sub_cache[(ex, sym)] = None
+
+                    l2_data = sub_cache.get((ex, sym))
+                    if l2_data:
+                        try:
+                            await ws.send_text(json.dumps(l2_data))
+                        except Exception:
+                            pass
 
             # Every 5th loop (~500ms), broadcast matrix and sample orderbook depth
             if loop_count % 5 == 0:
@@ -178,14 +231,28 @@ async def websocket_endpoint(websocket: WebSocket):
         history = state_store.get_recent_executions(limit=20)
         cfg = simulator.get_config()
 
+        init_spreads = {}
+        for s in ["BTCUSDT", "ETHUSDT", "SOLUSDT", "ETHBTC", "SOLBTC", "BNBUSDT"]:
+            bk = feed_manager.get_order_book("Binance", s)
+            if bk and bk.best_bid and bk.best_ask:
+                init_spreads[s] = {
+                    "spread_bps": round(bk.spread_bps, 2),
+                    "mid_price": round(bk.mid_price, 6 if (bk.mid_price or 0) < 10 else 2),
+                    "imbalance": round(bk.order_book_imbalance, 4),
+                    "best_bid": bk.best_bid[0],
+                    "best_ask": bk.best_ask[0]
+                }
+
         await websocket.send_text(json.dumps({
             "type": "INITIAL_STATE",
             "telemetry": telemetry,
             "matrix": matrix_data,
             "stats": stats,
             "history": history,
-            "config": cfg
+            "config": cfg,
+            "market_spreads": init_spreads
         }))
+
 
         while True:
             # Handle incoming commands from client
@@ -207,12 +274,38 @@ async def websocket_endpoint(websocket: WebSocket):
                     target = matching_routes[0]
 
                 if target:
-                    exec_result = simulator.execute_route(target, capital)
-                    await ws_manager.broadcast({
-                        "type": "EXECUTION",
-                        "trade": exec_result,
-                        "stats": state_store.get_aggregate_stats()
-                    })
+                    try:
+                        exec_result = simulator.execute_route(target, capital)
+                        await ws_manager.broadcast({
+                            "type": "EXECUTION",
+                            "trade": exec_result,
+                            "stats": state_store.get_aggregate_stats()
+                        })
+                    except ValueError as err:
+                        await websocket.send_text(json.dumps({
+                            "type": "ERROR",
+                            "message": str(err)
+                        }))
+
+            elif action == "SUBSCRIBE_BOOK":
+                ex = data.get("exchange", "Binance")
+                sym = data.get("symbol", "BTCUSDT").upper()
+                ws_manager.subscribe(websocket, ex, sym)
+                book = feed_manager.get_order_book(ex, sym)
+                if book:
+                    quote_curr = "USDT"
+                    for q in ["USDT", "BTC", "ETH"]:
+                        if sym.endswith(q):
+                            quote_curr = q
+                            break
+                    rate = math_engine.get_usd_value(quote_curr, 1.0)
+                    await websocket.send_text(json.dumps({
+                        "type": "L2_UPDATE",
+                        "exchange": ex,
+                        "symbol": sym,
+                        "depth": book.get_depth(levels=20),
+                        "slippage_curve": book.compute_slippage_curve(quote_usd_rate=rate)
+                    }))
 
             elif action == "UPDATE_CONFIG":
                 simulator.update_config(data.get("config", {}))
@@ -247,11 +340,21 @@ def get_matrix():
 
 @app.get("/api/orderbook/{exchange}/{symbol}")
 def get_order_book(exchange: str, symbol: str):
-    book = feed_manager.get_order_book(exchange, symbol.upper())
+    sym_upper = symbol.upper()
+    book = feed_manager.get_order_book(exchange, sym_upper)
     if not book:
         raise HTTPException(status_code=404, detail="Symbol or exchange not found")
     depth = book.get_depth(levels=20)
-    slippage_curve = book.compute_slippage_curve()
+    
+    # Determine quote currency and USD conversion rate
+    quote_curr = "USDT"
+    for q in ["USDT", "BTC", "ETH"]:
+        if sym_upper.endswith(q):
+            quote_curr = q
+            break
+    quote_usd_rate = math_engine.get_usd_value(quote_curr, 1.0)
+    slippage_curve = book.compute_slippage_curve(quote_usd_rate=quote_usd_rate)
+    
     return {
         "depth": depth,
         "slippage_curve": slippage_curve
@@ -282,14 +385,49 @@ from fastapi import Request
 async def update_config(request: Request):
     data = await request.json()
     simulator.update_config(data)
-    return simulator.get_config()
+    cfg = simulator.get_config()
+    await ws_manager.broadcast({
+        "type": "CONFIG_UPDATE",
+        "config": cfg
+    })
+    return cfg
+
+
+@app.get("/api/risk")
+def get_risk():
+    stats = state_store.get_aggregate_stats()
+    is_halted = simulator.is_kill_switch_engaged
+    return {
+        "kill_switch": is_halted,
+        "max_capital_per_trade": 50000.0,
+        "status": "HALTED" if is_halted else "ACTIVE_MONITORING",
+        "total_simulations": stats.get("total_trades", 0),
+        "net_pnl_usd": stats.get("total_net_pnl_usd", 0.0),
+        "win_rate_pct": stats.get("win_rate_pct", 0.0)
+    }
+
+
+@app.post("/api/risk")
+async def update_risk(request: Request):
+    data = await request.json()
+    if "kill_switch" in data:
+        simulator.set_kill_switch(bool(data["kill_switch"]))
+        await ws_manager.broadcast({
+            "type": "CONFIG_UPDATE",
+            "config": simulator.get_config()
+        })
+    return get_risk()
 
 
 @app.post("/api/simulate")
 async def simulate_trade(request: Request):
+    if simulator.is_kill_switch_engaged:
+        raise HTTPException(status_code=403, detail="EMERGENCY_KILL_SWITCH_ACTIVE: Execution halted by risk manager.")
+
     data = await request.json()
     route_id = data.get("route_id")
     capital_usd = float(data.get("capital_usd", 10000.0))
+
 
     routes, _ = math_engine.scan_all(capital_usd)
     target = None
@@ -304,8 +442,20 @@ async def simulate_trade(request: Request):
     if not target:
         raise HTTPException(status_code=400, detail="No viable arbitrage route currently available for execution")
 
-    exec_result = simulator.execute_route(target, capital_usd)
+    try:
+        exec_result = simulator.execute_route(target, capital_usd)
+    except ValueError as err:
+        raise HTTPException(status_code=403, detail=str(err))
+
+    stats = state_store.get_aggregate_stats()
+    await ws_manager.broadcast({
+        "type": "EXECUTION",
+        "trade": exec_result,
+        "stats": stats
+    })
+
     return {
         "trade": exec_result,
-        "stats": state_store.get_aggregate_stats()
+        "stats": stats
     }
+

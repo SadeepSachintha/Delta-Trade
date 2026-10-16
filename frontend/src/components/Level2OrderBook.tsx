@@ -40,43 +40,64 @@ interface Level2OrderBookProps {
   symbol: string;
   selectedExchange: string;
   onSelectExchange: (exchange: string) => void;
+  liveL2Data?: {
+    exchange: string;
+    symbol: string;
+    depth: OrderBookData;
+    slippage_curve: SlippageTier[];
+  } | null;
 }
 
 export const Level2OrderBook: React.FC<Level2OrderBookProps> = ({
   symbol,
   selectedExchange,
   onSelectExchange,
+  liveL2Data,
 }) => {
-  const [bookData, setBookData] = useState<OrderBookData | null>(null);
-  const [slippageCurve, setSlippageCurve] = useState<SlippageTier[]>([]);
+  const [snapshotData, setSnapshotData] = useState<{ depth: OrderBookData | null; slippage_curve: SlippageTier[] }>({
+    depth: null,
+    slippage_curve: [],
+  });
   const [activeTab, setActiveTab] = useState<'DEPTH' | 'SLIPPAGE'>('DEPTH');
 
   const exchanges = ['Binance', 'Bybit', 'OKX'];
 
+  // Derive active orderbook from live WebSocket stream or fallback to REST snapshot
+  const bookData = (liveL2Data && liveL2Data.exchange === selectedExchange && liveL2Data.symbol === symbol)
+    ? liveL2Data.depth
+    : snapshotData.depth;
+
+  const slippageCurve = (liveL2Data && liveL2Data.exchange === selectedExchange && liveL2Data.symbol === symbol && liveL2Data.slippage_curve)
+    ? liveL2Data.slippage_curve
+    : snapshotData.slippage_curve;
+
+  // Initial single snapshot fetch upon symbol/exchange change
   useEffect(() => {
     let isSubscribed = true;
 
-    const fetchDepth = async () => {
+    const fetchSnapshot = async () => {
       try {
         const res = await fetch(`/api/orderbook/${selectedExchange}/${symbol}`);
         if (!res.ok) return;
         const data = await res.json();
         if (isSubscribed) {
-          setBookData(data.depth);
-          setSlippageCurve(data.slippage_curve || []);
+          setSnapshotData({
+            depth: data.depth,
+            slippage_curve: data.slippage_curve || [],
+          });
         }
-      } catch (err) {
+      } catch {
         // Fallback gracefully
       }
     };
 
-    fetchDepth();
-    const interval = setInterval(fetchDepth, 250); // 4 updates/sec for depth polling
+    fetchSnapshot();
     return () => {
       isSubscribed = false;
-      clearInterval(interval);
     };
   }, [symbol, selectedExchange]);
+
+
 
   const imbalance = bookData?.imbalance || 0;
   const imbalancePct = (imbalance * 100).toFixed(1);

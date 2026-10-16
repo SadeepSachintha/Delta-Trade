@@ -17,14 +17,22 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
   const [latencyMs, setLatencyMs] = useState<number>(config?.simulated_latency_ms || 14.5);
   const [minSpreadBps, setMinSpreadBps] = useState<number>(config?.auto_min_spread_bps || 6.0);
   const [capitalUsd, setCapitalUsd] = useState<number>(config?.auto_trade_capital_usd || 10000.0);
+  const [killSwitch, setKillSwitch] = useState<boolean>(config?.kill_switch || false);
 
   if (!isOpen) return null;
+
+  const handleApplyPreset = (latency: number, minSpread: number, capital: number) => {
+    setLatencyMs(latency);
+    setMinSpreadBps(minSpread);
+    setCapitalUsd(capital);
+  };
 
   const handleSave = () => {
     onSaveConfig({
       simulated_latency_ms: latencyMs,
       auto_min_spread_bps: minSpreadBps,
       auto_trade_capital_usd: capitalUsd,
+      kill_switch: killSwitch,
     });
     onClose();
   };
@@ -48,8 +56,66 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
           </button>
         </div>
 
+        {/* Quick Presets */}
+        <div className="mb-4">
+          <div className="text-[10px] font-mono uppercase tracking-wider text-slate-400 mb-1.5">
+            Institutional Strategy Presets
+          </div>
+          <div className="grid grid-cols-3 gap-2">
+            <button
+              type="button"
+              onClick={() => handleApplyPreset(3.0, 3.0, 5000)}
+              className="px-2 py-1.5 rounded bg-slate-900 hover:bg-cyan-950/40 border border-slate-800 hover:border-cyan-500/40 text-[10px] font-mono text-slate-300 transition-colors"
+            >
+              ⚡ Scalper (3ms)
+            </button>
+            <button
+              type="button"
+              onClick={() => handleApplyPreset(14.5, 6.0, 10000)}
+              className="px-2 py-1.5 rounded bg-slate-900 hover:bg-cyan-950/40 border border-slate-800 hover:border-cyan-500/40 text-[10px] font-mono text-slate-300 transition-colors"
+            >
+              ⚖️ Standard (14ms)
+            </button>
+            <button
+              type="button"
+              onClick={() => handleApplyPreset(25.0, 12.0, 25000)}
+              className="px-2 py-1.5 rounded bg-slate-900 hover:bg-cyan-950/40 border border-slate-800 hover:border-cyan-500/40 text-[10px] font-mono text-slate-300 transition-colors"
+            >
+              🛡️ Safe (25ms)
+            </button>
+          </div>
+        </div>
+
         {/* Form Fields */}
         <div className="space-y-4 font-mono text-xs">
+          {/* Emergency Kill Switch */}
+          <div className={`p-3 rounded-lg border transition-all ${
+            killSwitch
+              ? 'bg-rose-950/40 border-rose-500/80 shadow-lg shadow-rose-950/30'
+              : 'bg-slate-900/60 border-slate-800'
+          }`}>
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-2">
+                <span className={`w-2.5 h-2.5 rounded-full ${killSwitch ? 'bg-rose-500 animate-ping' : 'bg-emerald-400'}`} />
+                <span className="font-bold text-slate-200">Emergency Kill Switch</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setKillSwitch(!killSwitch)}
+                className={`px-3 py-1 rounded text-[11px] font-bold transition-all ${
+                  killSwitch
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-md shadow-rose-600/40'
+                    : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                }`}
+              >
+                {killSwitch ? 'HALTED (ENGAGED)' : 'DISENGAGED'}
+              </button>
+            </div>
+            <div className="text-[10px] text-slate-400">
+              Immediately halts all automated bots and rejects execution orders across Python engine and PHP Risk console.
+            </div>
+          </div>
+
           {/* Latency Slider */}
           <div>
             <div className="flex justify-between text-slate-300 mb-1">
@@ -144,3 +210,4 @@ export const ConfigModal: React.FC<ConfigModalProps> = ({
     </div>
   );
 };
+

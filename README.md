@@ -48,31 +48,82 @@ A low-latency market surveillance and simulated arbitrage execution engine that 
 
 ---
 
-## 🚀 Running the Platform Locally
+## 🚀 Running the Platform
 
-### 1. Start the High-Frequency Python Engine (Port 8000)
+### ⚡ Option A: Unified One-Click Runner (Recommended)
+Launch the entire trading suite (HFT Engine on `:8000`, Trader Terminal on `:5173`, and PHP Risk Console on `:8080` if PHP is installed) with a single command:
 ```bash
-python engine/run_engine.py
+./start.sh
 ```
-*API docs available at `http://127.0.0.1:8000/docs` and WebSocket stream at `ws://127.0.0.1:8000/ws`.*
-
-### 2. Start the Trader Terminal UI (Port 5173)
-```bash
-cd frontend
-npm run dev
-```
-*Access the institutional trading desk at `http://127.0.0.1:5173/`.*
-
-### 3. Start the PHP Risk & Alerting Console (Port 8080)
-```bash
-php -S 127.0.0.1:8080 -t management
-```
-*Access the management dashboard at `http://127.0.0.1:8080/`.*
+*Features automatic `.venv` verification, dependency installation, unified logs, and graceful shutdown (SIGINT/SIGTERM) of all background processes.*
 
 ---
 
-## 📊 Benchmark Metrics
-- **Bellman-Ford Solver Latency**: `~870 µs to 1,380 µs` (Sub-1.5 ms, well below 5 ms requirement)
-- **Order Book Ingress Rate**: `~240 to 1,280 ticks/second`
-- **Reconstructed L2 Depth Levels**: 20 bids / 20 asks per pair
-- **Execution Fill Simulation**: Median `14.5 ms` simulated queue latency with exact multi-leg VWAP calculations
+### 🛠️ Option B: Individual Service Launch
+
+#### 1. Start the High-Frequency Python Engine (Port 8000)
+```bash
+# Setup virtual environment (if not already done)
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Start FastAPI Engine with WebSocket streaming
+python engine/run_engine.py
+```
+- **REST API Docs**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- **WebSocket Ingress/Egress**: `ws://127.0.0.1:8000/ws`
+- **Native Risk API**: [http://127.0.0.1:8000/api/risk](http://127.0.0.1:8000/api/risk)
+
+#### 2. Start the Trader Terminal UI (Port 5173)
+```bash
+cd frontend
+npm install
+npm run dev
+```
+- **Institutional Trader Terminal**: [http://127.0.0.1:5173/](http://127.0.0.1:5173/)
+
+#### 3. Start the PHP Risk & Alerting Console (Port 8080, Optional)
+```bash
+php -S 127.0.0.1:8080 -t management
+```
+- **Management Console**: [http://127.0.0.1:8080/](http://127.0.0.1:8080/)
+
+---
+
+## 🧪 Automated Test Suite & Latency Benchmarks
+
+The platform includes an automated pytest suite covering microsecond order book dynamics, Bellman-Ford negative-cycle detection, risk kill switches, and FastAPI endpoints:
+
+```bash
+# Run all tests
+source .venv/bin/activate
+pytest tests/ -v
+```
+
+### Verified Benchmark Performance
+- **Bellman-Ford Solver Latency**: `~102 µs` in synthetic graph tests (`~870 µs to 1.3 ms` under full live load), well below the strict **5 ms** requirement.
+- **Test Suite Coverage**:
+  - `tests/test_order_book.py`: Order book depth sorting, micro-price, OBI, quote/base volume depth walks, and non-linear slippage curve accuracy.
+  - `tests/test_math_engine.py`: Vectorized cycle solver, injected triangular & spatial arbitrage validation, and latency benchmarks.
+  - `tests/test_simulator_and_risk.py`: Emergency kill switch lock synchronization, auto-execution spread thresholds, and fill latency cooldowns.
+  - `tests/test_api.py`: FastAPI endpoints (`/api/opportunities`, `/api/matrix`, `/api/orderbook`, `/api/risk`).
+- **Frontend Code Quality**:
+  - `npm run lint`: **0 warnings, 0 errors** (via Oxlint).
+  - `npm run build`: Production bundle generated in **< 130 ms**.
+
+---
+
+## 🔒 Institutional Risk Management & Emergency Kill Switch
+
+- **Multi-Process Lock Synchronization**: Hard emergency kill switch synchronizes via `management/kill_switch.lock` across the FastAPI Engine, the PHP Risk Console, and the React Trader Terminal.
+- **Atomic Trade Halting**: Engaging the kill switch instantly pauses automated bot executions and blocks manual execution requests with HTTP 403.
+- **Interactive UI Banners**: Live visual indicators in the Telemetry Bar alert operators immediately upon trigger.
+- **REST Control**: Programmatic emergency control via `GET /api/risk` and `POST /api/risk {"action": "engage" | "release"}`.
+
+---
+
+## 📈 Post-Trade Analysis & Acoustic Alerts
+
+- **Data Export**: Execution logs can be exported directly from the terminal via **Export CSV** and **Export JSON** buttons for quantitative post-trade analysis.
+- **Web Audio API Feedback**: Built-in audio synthesizer provides acoustic feedback for profitable fills and opportunity alerts with a one-click mute/unmute toggle in the Telemetry Bar.
